@@ -2,7 +2,7 @@
  * tinychat.c - [Starting code for] a web-based chat server.
  *
  * Based on:
- *  tiny.c - A simple, iterative HTTP/1.0 Web server that uses the 
+ *  tiny.c - A simple, iterative HTTP/1.0 Web server that uses the
  *      GET method to serve static and dynamic content.
  *   Tiny Web server
  *   Dave O'Hallaron
@@ -17,11 +17,11 @@ dictionary_t *read_requesthdrs(rio_t *rp);
 void read_postquery(rio_t *rp, dictionary_t *headers, dictionary_t *d);
 void parse_query(const char *uri, dictionary_t *d);
 void serve_form(int fd, const char *pre_content);
-void clienterror(int fd, char *cause, char *errnum, 
+void clienterror(int fd, char *cause, char *errnum,
 		 char *shortmsg, char *longmsg);
 static void print_stringdictionary(dictionary_t *d);
 
-int main(int argc, char **argv) 
+int main(int argc, char **argv)
 {
   int listenfd, connfd;
   char hostname[MAXLINE], port[MAXLINE];
@@ -48,7 +48,7 @@ int main(int argc, char **argv)
     clientlen = sizeof(clientaddr);
     connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
     if (connfd >= 0) {
-      Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
+      Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
                   port, MAXLINE, 0);
       printf("Accepted connection from (%s, %s)\n", hostname, port);
       doit(connfd);
@@ -60,7 +60,7 @@ int main(int argc, char **argv)
 /*
  * doit - handle one HTTP request/response transaction
  */
-void doit(int fd) 
+void doit(int fd)
 {
   char buf[MAXLINE], *method, *uri, *version;
   rio_t rio;
@@ -71,7 +71,7 @@ void doit(int fd)
   if (Rio_readlineb(&rio, buf, MAXLINE) <= 0)
     return;
   printf("%s", buf);
-  
+
   if (!parse_request_line(buf, &method, &uri, &version)) {
     clienterror(fd, method, "400", "Bad Request",
                 "TinyChat did not recognize the request");
@@ -114,7 +114,7 @@ void doit(int fd)
 /*
  * read_requesthdrs - read HTTP request headers
  */
-dictionary_t *read_requesthdrs(rio_t *rp) 
+dictionary_t *read_requesthdrs(rio_t *rp)
 {
   char buf[MAXLINE];
   dictionary_t *d = make_dictionary(COMPARE_CASE_INSENS, free);
@@ -126,7 +126,7 @@ dictionary_t *read_requesthdrs(rio_t *rp)
     printf("%s", buf);
     parse_header_line(buf, d);
   }
-  
+
   return d;
 }
 
@@ -134,12 +134,12 @@ void read_postquery(rio_t *rp, dictionary_t *headers, dictionary_t *dest)
 {
   char *len_str, *type, *buffer;
   int len;
-  
+
   len_str = dictionary_get(headers, "Content-Length");
   len = (len_str ? atoi(len_str) : 0);
 
   type = dictionary_get(headers, "Content-Type");
-  
+
   buffer = malloc(len+1);
   Rio_readnb(rp, buffer, len);
   buffer[len] = 0;
@@ -153,7 +153,7 @@ void read_postquery(rio_t *rp, dictionary_t *headers, dictionary_t *dest)
 
 static char *ok_header(size_t len, const char *content_type) {
   char *len_str, *header;
-  
+
   header = append_strings("HTTP/1.0 200 OK\r\n",
                           "Server: TinyChat Web Server\r\n",
                           "Connection: close\r\n",
@@ -172,17 +172,18 @@ void serve_form(int fd, const char *pre_content)
 {
   size_t len;
   char *body, *header;
-  
+
   body = append_strings("<html><body>\r\n",
-                        "<p>Welcome to TinyChat</p>",
+                        "<p><b>Welcome to TinyChat</b></p>",
                         "\r\n<form action=\"reply\" method=\"post\"",
                         " enctype=\"application/x-www-form-urlencoded\"",
                         " accept-charset=\"UTF-8\">\r\n",
-                        "<input type=\"text\" name=\"content\">\r\n",
-                        "<input type=\"submit\" value=\"Send\">\r\n",
+												"Name: <input type=\"text\" name=\"name\"><br><br>\r\n",
+												"Topic: <input type=\"text\" name=\"topic\"><br><br>\r\n",
+                        "<input type=\"submit\" value=\"Join Conversation\">\r\n",
                         "</form></body></html>\r\n",
                         NULL);
-  
+
   len = strlen(body);
 
   /* Send response headers to client */
@@ -202,8 +203,8 @@ void serve_form(int fd, const char *pre_content)
 /*
  * clienterror - returns an error message to the client
  */
-void clienterror(int fd, char *cause, char *errnum, 
-		 char *shortmsg, char *longmsg) 
+void clienterror(int fd, char *cause, char *errnum,
+		 char *shortmsg, char *longmsg)
 {
   size_t len;
   char *header, *body, *len_str;
@@ -222,7 +223,7 @@ void clienterror(int fd, char *cause, char *errnum,
                           "Content-length: ", len_str = to_string(len), "\r\n\r\n",
                           NULL);
   free(len_str);
-  
+
   Rio_writen(fd, header, strlen(header));
   Rio_writen(fd, body, len);
 
