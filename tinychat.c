@@ -16,7 +16,8 @@ void doit(int fd);
 dictionary_t *read_requesthdrs(rio_t *rp);
 void read_postquery(rio_t *rp, dictionary_t *headers, dictionary_t *d);
 void parse_query(const char *uri, dictionary_t *d);
-void serve_form(int fd, const char *pre_content);
+void serve_form(int fd, dictionary_t* query);
+void serve_login(int fd, dictionary_t* query);
 void clienterror(int fd, char *cause, char *errnum,
 		 char *shortmsg, char *longmsg);
 static void print_stringdictionary(dictionary_t *d);
@@ -85,19 +86,27 @@ void doit(int fd)
       clienterror(fd, method, "501", "Not Implemented",
                   "TinyChat does not implement that method");
     } else {
+			printf("\nuri is %s\n\n", uri);
+
+
       headers = read_requesthdrs(&rio);
 
       /* Parse all query arguments into a dictionary */
       query = make_dictionary(COMPARE_CASE_SENS, free);
       parse_uriquery(uri, query);
-      if (!strcasecmp(method, "POST"))
+      if (!strcasecmp(method, "POST")){
         read_postquery(&rio, headers, query);
-
+				char* content = dictionary_get(query, "content");
+				printf("content is %s\n", content);
+			}
       /* For debugging, print the dictionary */
       print_stringdictionary(query);
 
-      /* The start code sends back a text-field form: */
-      serve_form(fd, "Welcome to TinyChat");
+      /* Serve either a login form or a chat room form: */
+			if(starts_with("/reply", uri))
+  			serve_form(fd, query);
+			else
+  			serve_login(fd, query);
 
       /* Clean up */
       free_dictionary(query);
@@ -168,21 +177,69 @@ static char *ok_header(size_t len, const char *content_type) {
 /*
  * serve_form - sends a form to a client
  */
-void serve_form(int fd, const char *pre_content)
+void serve_form(int fd, dictionary_t* query)
 {
   size_t len;
   char *body, *header;
 
+  char* user = dictionary_get(query, "user");
+	char* topic = dictionary_get(query, "topic");
+
+  if(user == NULL)
+    user = "Anonymous";
+
   body = append_strings("<html><body>\r\n",
-                        "<p><b>Welcome to TinyChat</b></p>",
+                        "<p>Welcome to TinyChat, ",
+			user,
+			"</p>",
+			"<p>Topic: ",
+topic,
+"</p>",
                         "\r\n<form action=\"reply\" method=\"post\"",
                         " enctype=\"application/x-www-form-urlencoded\"",
                         " accept-charset=\"UTF-8\">\r\n",
-												"Name: <input type=\"text\" name=\"name\"><br><br>\r\n",
-												"Topic: <input type=\"text\" name=\"topic\"><br><br>\r\n",
-                        "<input type=\"submit\" value=\"Join Conversation\">\r\n",
+												"<input type=\"hidden\" name=\"user\" value=\"", user, "\">\r\n",
+												"<input type=\"hidden\" name=\"topic\" value=\"", topic, "\">\r\n",
+												user, ": ", 
+                        "<input type=\"text\" name=\"content\">\r\n",
+                        "<input type=\"submit\" value=\"Send\">\r\n",
                         "</form></body></html>\r\n",
                         NULL);
+
+  len = strlen(body);
+
+  /* Send response headers to client */
+  header = ok_header(len, "text/html; charset=utf-8");
+  Rio_writen(fd, header, strlen(header));
+  printf("Response headers:\n");
+  printf("%s", header);
+
+  free(header);
+
+  /* Send response body to client */
+  Rio_writen(fd, body, len);
+
+  free(body);
+}
+
+/*
+ * serve_login - sends a login form to a client
+ */
+void serve_login(int fd, dictionary_t* query)
+{
+  size_t len;
+  char *body, *header;
+
+	body = append_strings("<html><body>\r\n",
+                      "<p>Welcome to TinyChat, please log in</p>",
+                      "\r\n<form action=\"reply\" method=\"post\"",
+                      " enctype=\"application/x-www-form-urlencoded\"",
+                      " accept-charset=\"UTF-8\">\r\n",
+											"Name: <input type=\"text\" name=\"user\"><br><br>\r\n",
+											"Topic: <input type=\"text\" name=\"topic\"><br><br>\r\n",
+											"<input type=\"submit\" value=\"Join Conversation\">\r\n",
+                      "</form></body></html>\r\n",
+                      NULL);
 
   len = strlen(body);
 
