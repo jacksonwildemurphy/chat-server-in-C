@@ -16,11 +16,16 @@ void doit(int fd);
 dictionary_t *read_requesthdrs(rio_t *rp);
 void read_postquery(rio_t *rp, dictionary_t *headers, dictionary_t *d);
 void parse_query(const char *uri, dictionary_t *d);
-void serve_form(int fd, dictionary_t* query);
+void serve_form(int fd, dictionary_t* query, dictionary_t* topics);
 void serve_login(int fd, dictionary_t* query);
+void serve_topic_conversation(int fd, dictionary_t* query, dictionary_t* topics);
+void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics);
 void clienterror(int fd, char *cause, char *errnum,
 		 char *shortmsg, char *longmsg);
 static void print_stringdictionary(dictionary_t *d);
+
+/* Holds the conversations of each topic */
+static dictionary_t* topics;
 
 int main(int argc, char **argv)
 {
@@ -44,6 +49,10 @@ int main(int argc, char **argv)
 
   /* Also, don't stop on broken connections: */
   Signal(SIGPIPE, SIG_IGN);
+
+	/* Keep the conversations of each topic in memory */
+	topics = make_dictionary(COMPARE_CASE_SENS, free);
+
 
   while (1) {
     clientlen = sizeof(clientaddr);
@@ -98,15 +107,24 @@ void doit(int fd)
         read_postquery(&rio, headers, query);
 				char* content = dictionary_get(query, "content");
 				printf("content is %s\n", content);
+				/* Serve either a login form or a chat room form: */
+				if(starts_with("/reply", uri))
+				serve_form(fd, query, topics);
+
+			}
+			else{ // Request was a GET
+
+				if(starts_with("/conversation?topic=", uri))
+					serve_topic_conversation(fd, query, topics);
+				else if(starts_with("/say?user=", uri))
+					add_conversation_content(fd, query, topics);
+				else
+					serve_login(fd, query);
+
 			}
       /* For debugging, print the dictionary */
       print_stringdictionary(query);
 
-      /* Serve either a login form or a chat room form: */
-			if(starts_with("/reply", uri))
-  			serve_form(fd, query);
-			else
-  			serve_login(fd, query);
 
       /* Clean up */
       free_dictionary(query);
@@ -174,33 +192,126 @@ static char *ok_header(size_t len, const char *content_type) {
   return header;
 }
 
+/* Adds the given content to the specified topic as the specified user.
+	Returns a successful html response header but nothing else if the parameters
+	were legal. Otherwise returns an error header*/
+void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics)
+{
+	if(dictionary_count(query) != 3){
+		clienterror(fd, "Bad query format", "400",
+				 "Bad Request", "Expected format of /say?user=<user>&topic=<topic>&content=<content>");
+		return;
+	}
+
+	size_t len;
+  char *body, *header;
+
+  char* user = dictionary_get(query, "user");
+	char* topic = dictionary_get(query, "topic");
+	char* new_post = dictionary_get(query, "content");
+	char* history = dictionary_get(topics, topic);
+
+  if(user == NULL || !strcmp(user, "")){
+		user = "Anonymous";
+	}
+	if(history == NULL)
+    history = "";
+
+	if(new_post == NULL || strlen(new_post) == 0)
+		new_post = "";
+
+	new_post = append_strings(user, ": ", new_post, "\r\n", NULL);
+	history = append_strings(history, new_post, NULL);
+	dictionary_set(topics, topic, history);
+
+
+	body = "Your content was added to the conversation.\r\n";
+	len = strlen(body);
+
+  /* Send response headers to client */
+  header = ok_header(len, "text/plain; charset=utf-8");
+  Rio_writen(fd, header, strlen(header));
+  printf("Response headers:\n");
+  printf("%s", header);
+
+  free(header);
+
+  /* Send response body to client */
+  Rio_writen(fd, body, len);
+}
+
+
+/*
+ * Returns the conversation content of a given topic in plaintext
+ */
+void serve_topic_conversation(int fd, dictionary_t* query, dictionary_t* topics)
+{
+	char* topic = dictionary_get(query, "topic");
+	char* conversation = dictionary_get(topics, topic);
+	char *body, *header;
+
+	// If the topic doesn't exist, send back an empty response body
+	if(conversation == NULL)
+		body = "";
+
+	// Return the topic's conversation content as plaintext
+	else{
+		body = conversation;
+	}
+
+	size_t len = strlen(body);
+
+  /* Send response headers to client */
+  header = ok_header(len, "text/plain; charset=utf-8");
+  Rio_writen(fd, header, strlen(header));
+  printf("Response headers:\n");
+  printf("%s", header);
+
+  free(header);
+
+  /* Send response body to client */
+  Rio_writen(fd, body, len);
+}
+
+
 /*
  * serve_form - sends a form to a client
  */
-void serve_form(int fd, dictionary_t* query)
+void serve_form(int fd, dictionary_t* query, dictionary_t* topics)
 {
   size_t len;
   char *body, *header;
 
   char* user = dictionary_get(query, "user");
 	char* topic = dictionary_get(query, "topic");
+	char* new_post = dictionary_get(query, "content");
+	char* history = dictionary_get(topics, topic);
 
-  if(user == NULL)
-    user = "Anonymous";
+  if(user == NULL || !strcmp(user, "")){
+		user = "Anonymous";
+	}
+	if(history == NULL)
+    history = "";
+
+	if(new_post == NULL || strlen(new_post) == 0)
+		new_post = "";
+  else {
+		new_post = append_strings(user, ": ", new_post, "\r\n", NULL);
+		history = append_strings(history, new_post, NULL);
+		dictionary_set(topics, topic, history);
+	}
 
   body = append_strings("<html><body>\r\n",
                         "<p>Welcome to TinyChat, ",
-			user,
-			"</p>",
-			"<p>Topic: ",
-topic,
-"</p>",
+			user,"</p>",
+			"<p>Topic: ",topic,"</p>",
+			"<textarea readonly rows=\"10\" cols=\"60\">",history, "</textarea>",
                         "\r\n<form action=\"reply\" method=\"post\"",
                         " enctype=\"application/x-www-form-urlencoded\"",
                         " accept-charset=\"UTF-8\">\r\n",
 												"<input type=\"hidden\" name=\"user\" value=\"", user, "\">\r\n",
 												"<input type=\"hidden\" name=\"topic\" value=\"", topic, "\">\r\n",
-												user, ": ", 
+												user, ": ",
                         "<input type=\"text\" name=\"content\">\r\n",
                         "<input type=\"submit\" value=\"Send\">\r\n",
                         "</form></body></html>\r\n",
