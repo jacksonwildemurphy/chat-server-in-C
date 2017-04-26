@@ -8,10 +8,12 @@
  *   Dave O'Hallaron
  *   Carnegie Mellon University
  */
+#include <unistd.h>
 #include "csapp.h"
 #include "dictionary.h"
 #include "more_string.h"
 #include <pthread.h>
+
 
 void* doit(void* fd_p);
 dictionary_t *read_requesthdrs(rio_t *rp);
@@ -20,14 +22,21 @@ void parse_query(const char *uri, dictionary_t *d);
 void serve_form(int fd, dictionary_t* query, dictionary_t* topics);
 void serve_login(int fd, dictionary_t* query);
 void serve_topic_conversation(int fd, dictionary_t* query, dictionary_t* topics);
-void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics);
+void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics, int internal_request);
 void import_topic_content(int fd, dictionary_t* query, dictionary_t* topics);
 void clienterror(int fd, char *cause, char *errnum,
 		 char *shortmsg, char *longmsg);
+static void dictionary_change_topic(char* topic, char* content);
 static void print_stringdictionary(dictionary_t *d);
 
 /* Holds the conversations of each topic */
 static dictionary_t* topics;
+
+/* Semaphore lock for safe concurrent handling of client requests*/
+static sem_t lock;
+
+static char* serverport;
+
 
 int main(int argc, char **argv)
 {
@@ -36,6 +45,8 @@ int main(int argc, char **argv)
   socklen_t clientlen;
   struct sockaddr_storage clientaddr;
 	pthread_t tid;
+	Sem_init(&lock, 0, 1);
+	serverport = argv[1];
 
   /* Check command line args */
   if (argc != 2) {
@@ -65,7 +76,6 @@ int main(int argc, char **argv)
       Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE,
                   port, MAXLINE, 0);
       printf("Accepted connection from (%s, %s)\n", hostname, port);
-      doit(connfd_p);
 			Pthread_create(&tid, NULL, doit, connfd_p);
 			Pthread_detach(tid);
     }
@@ -123,7 +133,7 @@ void* doit(void* fd_p)
 				if(starts_with("/conversation?topic=", uri))
 					serve_topic_conversation(fd, query, topics);
 				else if(starts_with("/say?user=", uri))
-					add_conversation_content(fd, query, topics);
+					add_conversation_content(fd, query, topics, 0);
 				else if(starts_with("/import?topic=", uri))
 					import_topic_content(fd, query, topics);
 				else
@@ -133,11 +143,8 @@ void* doit(void* fd_p)
       /* For debugging, print the dictionary */
       print_stringdictionary(query);
 
-			/* Close the connection */
-			Close(fd);
 
       /* Clean up */
-			free(fd_p);
       free_dictionary(query);
       free_dictionary(headers);
     }
@@ -148,6 +155,11 @@ void* doit(void* fd_p)
     free(version);
 
   }
+
+	free(fd_p);
+
+	/* Close the connection */
+	Close(fd);
 	return NULL;
 }
 
@@ -223,16 +235,27 @@ void import_topic_content(int fd, dictionary_t* query, dictionary_t* topics)
 	char* host = dictionary_get(query, "host");
 	char* port = dictionary_get(query, "port");
 
+	// If host and port number are for this server, just make a copy of the topic and append it to itself
+	if(!strcasecmp("localhost", host) && !strcasecmp(serverport, port)){
+		printf("server and client are the same\n");
+		char* contents = append_strings(dictionary_get(topics, topic), NULL);
+		dictionary_set(query, "content", contents);
+		add_conversation_content(fd, query, topics, 1);
+		return;
+	}
+
+	char* req_header = append_strings("GET /conversation?topic=", topic, " HTTP/1.1\r\n\r\n", NULL);
 
 	// Try to connect with specified host
 	int clientfd;
 	rio_t rio;
-	char* req_header = append_strings("GET /conversation?topic=", topic, " HTTP/1.1\r\n\r\n", NULL);
 	clientfd = Open_clientfd(host, port);
 	Rio_readinitb(&rio, clientfd);
 	Rio_writen(clientfd, req_header, strlen(req_header));
 	char buf[MAXBUF];
-	char* response = "";
+	char* response = malloc(sizeof(char));
+	// used to free memory during repeated appending of server response lines to 'response'
+	char* old_response;
 	Rio_readlineb(&rio, buf, MAXBUF);
 	printf("Import server response status was: %s\n", buf );
 
@@ -240,16 +263,19 @@ void import_topic_content(int fd, dictionary_t* query, dictionary_t* topics)
 	if((!starts_with("HTTP/1.0 200 OK", buf) && !starts_with("HTTP/1.0 200 OK", buf))){
 		clienterror(fd, "Bad query format", "400",
 			 "Bad Request", "The host and port you supplied don't seem to be for a chat server");
+	free(req_header);
 	return;
 	}
 
 	// Our connection with the specified host and port was successful
-	while(strcmp(buf, "\r\n"))
+	while(strcmp(buf, "\r\n")) // Consume the headers
 		Rio_readlineb(&rio, buf, MAXBUF);
 
 	printf("Out of the while loop. Response body: \n");
 	while(Rio_readlineb(&rio, buf, MAXBUF)){
+		old_response = response;
 		response = append_strings(response, buf, NULL);
+		free(old_response);
 	}
 	printf("%s\n", response);
 	Close(clientfd);
@@ -262,9 +288,8 @@ void import_topic_content(int fd, dictionary_t* query, dictionary_t* topics)
 		response = "";
 
 	history = append_strings(history, response, NULL);
-	dictionary_set(topics, topic, history);
-	//free(response);
-	//free(history);
+	dictionary_change_topic(topic, history);
+	free(response);
 
 	char* body = "The conversation was successfully imported.\r\n";
 	size_t len = strlen(body);
@@ -286,13 +311,15 @@ void import_topic_content(int fd, dictionary_t* query, dictionary_t* topics)
 /* Adds the given content to the specified topic as the specified user.
 	Returns a successful html response header but nothing else if the parameters
 	were legal. Otherwise returns an error header*/
-void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics)
+void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics, int internal_request)
 {
-	if(dictionary_count(query) != 3){
-		clienterror(fd, "Bad query format", "400",
-				 "Bad Request", "Expected format of /say?user=<user>&topic=<topic>&content=<content>");
-		return;
-	}
+	if(internal_request == 0){
+		if(dictionary_count(query) != 3){
+			clienterror(fd, "Bad query format", "400",
+					 "Bad Request", "Expected format of /say?user=<user>&topic=<topic>&content=<content>");
+			return;
+		}
+  }
 
 	size_t len;
   char *body, *header;
@@ -313,9 +340,8 @@ void add_conversation_content(int fd, dictionary_t* query, dictionary_t* topics)
 
 	new_post = append_strings(user, ": ", new_post, "\r\n", NULL);
 	history = append_strings(history, new_post, NULL);
-	dictionary_set(topics, topic, history);
+	dictionary_change_topic(topic, history);
 	free(new_post);
-	free(history);
 
 
 	body = "Your content was added to the conversation.\r\n";
@@ -372,7 +398,6 @@ void serve_topic_conversation(int fd, dictionary_t* query, dictionary_t* topics)
  */
 void serve_form(int fd, dictionary_t* query, dictionary_t* topics)
 {
-	int should_free_history = 0;
   size_t len;
   char *body, *header;
 
@@ -392,9 +417,8 @@ void serve_form(int fd, dictionary_t* query, dictionary_t* topics)
   else {
 		new_post = append_strings(user, ": ", new_post, "\r\n", NULL);
 		history = append_strings(history, new_post, NULL);
-		should_free_history = 1;
-		dictionary_set(topics, topic, history);
-		//free(new_post);
+		dictionary_change_topic(topic, history);
+		free(new_post);
 	}
 
   body = append_strings("<html><body>\r\n",
@@ -412,8 +436,7 @@ void serve_form(int fd, dictionary_t* query, dictionary_t* topics)
                         "<input type=\"submit\" value=\"Send\">\r\n",
                         "</form></body></html>\r\n",
                         NULL);
-	//if(should_free_history)
-		//free(history);
+
 
   len = strlen(body);
 
@@ -495,6 +518,12 @@ void clienterror(int fd, char *cause, char *errnum,
 
   free(header);
   free(body);
+}
+
+static void dictionary_change_topic(char* topic, char* content){
+	P(&lock);
+	dictionary_set(topics, topic, content);
+	V(&lock);
 }
 
 static void print_stringdictionary(dictionary_t *d)
